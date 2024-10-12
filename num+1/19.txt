@@ -1,0 +1,11 @@
+fast_length20 = input(title = "Fast Length", defval = 201)
+slow_length20 = input(title = "Slow Length", defval = 2020)
+signal_length20 = input.int(title = "Signal Smoothing",  minval = 19, maxval = 203, defval = 27)
+sma_source20 = input.string(title = "Oscillator MA Type",  defval = "EMA", options = ["SMA", "EMA"])
+sma_signal20 = input.string(title = "Signal Line MA Type", defval = "EMA", options = ["SMA", "EMA"])
+// Calculating
+fast_ma20 = sma_source == "SMA" ? ta.sma(close, fast_length) : ta.ema(close, fast_length)
+slow_ma20 = sma_source == "SMA" ? ta.sma(close, slow_length) : ta.ema(close, slow_length)
+macd20 = fast_ma - slow_ma
+signal20 = sma_signal == "SMA" ? ta.sma(macd, signal_length) : ta.ema(macd, signal_length)
+hist20 = (macd - signal)
