@@ -1234,7 +1234,7 @@ class PythonProjectAnalyzer:
 
         返回包含分析结果的字典
         """
-        self.logger.debug(f"开始分析项目: {self.root_path}")
+        self.logger.info(f"开始分析项目: {self.root_path}")
 
         result = {
             "structure": [],
@@ -1825,9 +1825,9 @@ class OutputFormatter:
     def _text_format(result: Dict, config: Dict) -> str:
         """格式化结果为纯文本"""
         output = [
-            f"{Colors.BOLD}{Colors.CYAN}" + "=" * 55 + f"{Colors.RESET}",
-            f"{Colors.BOLD}{Colors.CYAN}=         Python代码库分析报告 v{__version__}                 ={Colors.RESET}",
-            f"{Colors.BOLD}{Colors.CYAN}" + "=" * 55 + f"{Colors.RESET}",
+            f"{Colors.BOLD}{Colors.CYAN}" + "=" * 50 + f"{Colors.RESET}",
+            f"{Colors.BOLD}{Colors.CYAN}=         Python代码库分析报告 v{__version__}            ={Colors.RESET}",
+            f"{Colors.BOLD}{Colors.CYAN}" + "=" * 50 + f"{Colors.RESET}",
             ""
         ]
 
