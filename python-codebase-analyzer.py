@@ -1,6 +1,6 @@
 """
 ======================================================
-=          优化版Python代码库分析工具 v3.0.0         =
+=          优化版Python代码库分析工具                  =
 ======================================================
 
 专用于分析Python项目的强化工具，提供详细的代码质量报告：
@@ -14,15 +14,18 @@
 - 详细代码行数统计
 
 作者: Claude
-版本: 3.0.0
 更新: 模块化重构，增强分析功能
 ======================================================
 """
+
+# 版本信息
+__version__ = "3.0.0"
 
 import os
 import ast
 import fnmatch
 import json
+import logging
 import re
 import sys
 import time
@@ -31,6 +34,124 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Set, Optional, Any, Tuple, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
+from enum import Enum
+import argparse
+
+
+
+# =================== 日志配置模块 ===================
+class LogLevel(Enum):
+    """日志级别枚举"""
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class AnalysisOptions:
+    """分析功能开关配置类
+    
+    每个开关控制对应功能的计算和输出
+    关闭功能后，不仅不显示结果，也不进行相关计算
+    """
+    
+    def __init__(self):
+        # 功能开关（控制功能的计算和输出）
+        self.calculate_detailed_lines = True      # 计算详细行数分解
+        self.detect_antipatterns = True           # 检测反模式
+        self.check_naming_conventions = True      # 检查命名规范
+        self.analyze_imports = True               # 分析导入依赖
+        self.calculate_complexity = True          # 计算循环复杂度
+        self.analyze_docstrings = True            # 分析文档字符串
+        self.calculate_quality_score = True       # 计算质量评分
+        self.build_dependency_graph = True        # 构建依赖关系图
+        self.show_project_structure = True        # 显示项目结构
+        
+        # 日志级别（只控制计算过程中的日志输出）
+        self.log_level = LogLevel.INFO
+        
+    def set_log_level(self, level: LogLevel):
+        """设置日志级别"""
+        self.log_level = level
+        
+    def disable_all_features(self):
+        """禁用所有功能（只保留基本统计）"""
+        self.calculate_detailed_lines = False
+        self.detect_antipatterns = False
+        self.check_naming_conventions = False
+        self.analyze_imports = False
+        self.calculate_complexity = False
+        self.analyze_docstrings = False
+        self.calculate_quality_score = False
+        self.build_dependency_graph = False
+        
+    def enable_basic_features_only(self):
+        """只启用基本功能"""
+        self.disable_all_features()
+        self.show_project_structure = True
+
+
+class AnalysisLogger:
+    """分析日志管理器
+    
+    只负责日志输出，不控制功能开关
+    """
+    
+    def __init__(self, log_level: LogLevel):
+        self.log_level = log_level
+        self.setup_logger()
+        
+    def setup_logger(self):
+        """设置日志记录器"""
+        # 创建日志记录器
+        self.logger = logging.getLogger('CodeAnalyzer')
+        self.logger.setLevel(getattr(logging, self.log_level.value))
+        
+        # 清除现有处理器
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
+            
+        # 创建控制台处理器
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(getattr(logging, self.log_level.value))
+        
+        # 设置日志格式
+        if self.log_level == LogLevel.DEBUG:
+            formatter = logging.Formatter(
+                f'{Colors.GRAY}[%(asctime)s] %(levelname)s: %(message)s{Colors.RESET}',
+                datefmt='%H:%M:%S'
+            )
+        else:
+            formatter = logging.Formatter(
+                f'{Colors.GRAY}%(levelname)s: %(message)s{Colors.RESET}'
+            )
+            
+        console_handler.setFormatter(formatter)
+        self.logger.addHandler(console_handler)
+        
+    def debug(self, message: str):
+        """输出调试信息"""
+        self.logger.debug(message)
+        
+    def info(self, message: str):
+        """输出信息"""
+        self.logger.info(message)
+        
+    def warning(self, message: str):
+        """输出警告"""
+        self.logger.warning(f"{Colors.YELLOW}{message}{Colors.RESET}")
+        
+    def error(self, message: str):
+        """输出错误"""
+        self.logger.error(f"{Colors.RED}{message}{Colors.RESET}")
+        
+    def file_progress(self, file_path: str, current: int, total: int):
+        """显示文件处理进度（DEBUG级别显示）"""
+        if self.log_level == LogLevel.DEBUG:
+            percentage = (current / total) * 100 if total > 0 else 0
+            self.debug(f"处理文件 [{current}/{total}] ({percentage:.1f}%): {file_path}")
+
+# ================== 日志配置模块结束 ==================
 
 
 # =================== 配置模块 ===================
@@ -72,14 +193,21 @@ CONFIG = {
     "show_hidden": False,
     "max_workers": 4,
     "max_file_size_mb": 10,  # 跳过大于此大小的文件
-    "detailed_imports": True,  # 分析导入依赖
-    "detect_antipatterns": True,  # 寻找常见反模式
-    "calculate_complexity": True,  # 计算循环复杂度
-    "analyze_docstrings": True,  # 检查文档字符串
-    "check_naming": True,  # 检查命名规范
     "color_output": True,  # 彩色终端输出
-    "show_line_numbers": True,  # 显示代码行数
-    "detailed_analysis": True,  # 详细分析模式
+    
+    # 功能开关（控制功能的计算和输出）
+    "calculate_detailed_lines": True,      # 计算详细行数分解
+    "detect_antipatterns": True,           # 检测反模式
+    "check_naming_conventions": True,      # 检查命名规范
+    "analyze_imports": True,               # 分析导入依赖
+    "calculate_complexity": True,          # 计算循环复杂度
+    "analyze_docstrings": True,            # 分析文档字符串
+    "calculate_quality_score": True,       # 计算质量评分
+    "build_dependency_graph": True,        # 构建依赖关系图
+    "show_project_structure": True,        # 显示项目结构
+    
+    # 日志级别（只控制计算过程中的日志输出）
+    "log_level": "INFO",  # DEBUG/INFO/WARNING/ERROR
 }
 # ================== 配置模块结束 ==================
 
@@ -332,7 +460,10 @@ class LineCountAnalyzer:
 
 
 class AntiPatternDetector:
-    """检测Python代码中的常见反模式"""
+    """检测Python代码中的常见反模式
+    
+    按照PEP8规范和模块化设计原则，提供精准的反模式检测
+    """
 
     PATTERNS = {
         "bare_except": (r"except\s*:", "使用裸except语句"),
@@ -345,13 +476,19 @@ class AntiPatternDetector:
         "exec_usage": (r"\bexec\(", "使用exec()函数"),
         "wildcard_import": (r"from\s+[\w.]+\s+import\s+\*", "使用通配符导入"),
         "exit_call": (r"\bexit\(", "使用exit()而非sys.exit()"),
-        "print_debugging": (r"\bprint\(", "可能存在调试用print语句"),
-        "hardcoded_path": (r"(?<!['\"])\/\w+(?=\/|$)|[A-Za-z]:\\", "硬编码文件路径"),
+        "print_debugging": (r"^\s*print\(", "可能存在调试用print语句"),
+        "hardcoded_path": (
+            # 只检测真正的硬编码文件路径，排除URL和Django路由
+            r"(?<!['\"])((?:[A-Za-z]:\\[\\\w\s.-]+)|(?:^\s*['\"]?/(?:usr|home|var|etc|opt|tmp)/[\w/.-]+['\"]?\s*$))",
+            "硬编码文件路径"
+        ),
         "nested_function": (
             r"def\s+\w+\s*\([^)]*\):\s*[^\n]*\n\s+def\s+",
             "嵌套函数定义",
         ),
         "too_many_arguments": (r"def\s+\w+\s*\([^)]{80,}\)", "函数参数过多"),
+        "long_line": (r"^.{120,}$", "代码行过长(>120字符)"),
+        "multiple_statements": (r";.*\w", "多个语句在同一行"),
     }
 
     @staticmethod
@@ -361,22 +498,93 @@ class AntiPatternDetector:
         返回包含（行，描述）的元组列表
         """
         antipatterns = []
+        lines = code.splitlines()
+        
         for name, (pattern, description) in AntiPatternDetector.PATTERNS.items():
-            if name == "print_debugging" and "debugging" in code.lower():
-                # 跳过调试模块中的print
+            # 跳过特殊情况
+            if name == "print_debugging":
+                # 只检测单独的print语句，排除函数内部和文档字符串中的print
+                if "logging" in code.lower() or "logger" in code.lower():
+                    continue
+                    
+            if name == "hardcoded_path":
+                # 特殊处理硬编码路径检测
+                AntiPatternDetector._detect_hardcoded_paths(lines, antipatterns)
                 continue
-
-            matches = re.finditer(pattern, code)
+                
+            if name == "long_line" or name == "multiple_statements":
+                # 按行检测
+                for line_num, line in enumerate(lines, 1):
+                    if re.search(pattern, line):
+                        # 排除注释和字符串中的误报
+                        if line.strip().startswith('#') or line.strip().startswith('"""') or line.strip().startswith("'''"):
+                            continue
+                        antipatterns.append((f"第{line_num}行: {line.strip()[:50]}...", description))
+                continue
+            
+            # 常规模式匹配
+            matches = re.finditer(pattern, code, re.MULTILINE)
             for match in matches:
-                line_start = code[: match.start()].count("\n") + 1
+                line_start = code[:match.start()].count("\n") + 1
                 line = (
-                    code.splitlines()[line_start - 1]
-                    if line_start <= len(code.splitlines())
+                    lines[line_start - 1].strip()
+                    if line_start <= len(lines)
                     else ""
                 )
-                antipatterns.append((f"第{line_start}行: {line.strip()}", description))
+                
+                # 排除误报
+                if AntiPatternDetector._should_skip_match(name, line, code, match):
+                    continue
+                    
+                antipatterns.append((f"第{line_start}行: {line[:50]}...", description))
 
         return antipatterns
+    
+    @staticmethod
+    def _detect_hardcoded_paths(lines: List[str], antipatterns: List[Tuple[str, str]]):
+        """检测硬编码路径，排除误报"""
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            
+            # 排除明显的非路径情况
+            if (
+                line.startswith('#') or  # 注释
+                'http://' in line or 'https://' in line or  # URL
+                'path(' in line.lower() or  # Django URL模式
+                'url(' in line.lower() or   # URL模式
+                '用户名' in line or '邮箱' in line or '手机号' in line or  # 中文文本
+                line.startswith('"""') or line.startswith("'''") or  # 文档字符串
+                'docs.djangoproject.com' in line or  # Django文档
+                'www.' in line or '.com' in line or '.org' in line  # 网址
+            ):
+                continue
+            
+            # 检测真正的硬编码路径
+            path_patterns = [
+                r"(['\"])/(?:usr|home|var|etc|opt|tmp|root)/[\w/.-]+['\"]?",  # Unix路径
+                r"(['\"])[A-Za-z]:\\[\\\w\s.-]+['\"]?",  # Windows路径
+                r"\\\\[\w.-]+\\[\w\\.-]+",  # UNC路径
+            ]
+            
+            for pattern in path_patterns:
+                if re.search(pattern, line):
+                    antipatterns.append((f"第{line_num}行: {line[:50]}...", "硬编码文件路径"))
+                    break
+    
+    @staticmethod
+    def _should_skip_match(pattern_name: str, line: str, code: str, match) -> bool:
+        """判断是否应该跳过该匹配"""
+        if pattern_name == "print_debugging":
+            # 排除非调试用途的print
+            if (
+                'def ' in line and 'print(' in line or  # 函数定义中的print
+                '"""' in line or "'''" in line or  # 文档字符串中的print
+                line.strip().startswith('#') or  # 注释中的print
+                'format' in line or 'f"' in line  # 格式化字符串
+            ):
+                return True
+                
+        return False
 
 
 class NamingConventionChecker:
@@ -644,11 +852,12 @@ class QualityScoreCalculator:
 class PythonModuleAnalyzer:
     """分析Python模块（使用AST）"""
 
-    def __init__(self, file_path: Path):
+    def __init__(self, file_path: Path, logger: AnalysisLogger):
         self.file_path = file_path
         self.stats = FileStats()
         self.module_ast = None
         self.code_content = ""
+        self.logger = logger
 
     @staticmethod
     def _is_string_constant(node) -> bool:
@@ -675,7 +884,10 @@ class PythonModuleAnalyzer:
 
     def analyze(self) -> FileStats:
         """分析Python文件并返回统计信息"""
+        self.logger.debug(f"开始分析文件: {self.file_path}")
+        
         if not self._read_file():
+            self.logger.warning(f"无法读取文件: {self.file_path}")
             return self.stats
 
         # 统计基本指标
@@ -683,21 +895,28 @@ class PythonModuleAnalyzer:
 
         # 解析AST
         if not self._parse_ast():
+            self.logger.warning(f"无法解析AST: {self.file_path}")
             return self.stats
 
         # 执行AST分析
         if self.module_ast:
+            self.logger.debug(f"正在分析AST: {self.file_path}")
             self._analyze_ast()
 
-        # 检测反模式
+        # 检测反模式（只在启用时计算）
         if CONFIG["detect_antipatterns"]:
+            self.logger.debug(f"正在检测反模式: {self.file_path}")
             self._detect_antipatterns()
 
-        # 计算质量评分
-        self.stats.quality_score = QualityScoreCalculator.calculate_file_score(
-            self.stats
-        )
-
+        # 计算质量评分（只在启用时计算）
+        if CONFIG["calculate_quality_score"]:
+            self.stats.quality_score = QualityScoreCalculator.calculate_file_score(
+                self.stats
+            )
+            self.logger.debug(f"完成分析文件: {self.file_path}, 质量评分: {self.stats.quality_score}")
+        else:
+            self.logger.debug(f"完成分析文件: {self.file_path}")
+            
         return self.stats
 
     def _build_directory_structure(self, dir_path: Path, result: Dict) -> Dict:
@@ -747,54 +966,74 @@ class PythonModuleAnalyzer:
         try:
             file_size = self.file_path.stat().st_size
             if file_size > CONFIG["max_file_size_mb"] * 1024 * 1024:
+                self.logger.warning(f"文件过大，跳过: {self.file_path} ({file_size / (1024*1024):.1f}MB)")
                 return False
 
             with open(self.file_path, "r", encoding="utf-8") as f:
                 self.code_content = f.read()
+            self.logger.debug(f"成功读取文件: {self.file_path}")
             return True
         except Exception as e:
+            self.logger.error(f"读取文件失败: {self.file_path} - {str(e)}")
             return False
 
     def _count_lines(self):
         """
         统计文件中不同类型的行
         
-        使用模块化的LineCountAnalyzer进行详细分析
-        遵循PEP8规范，提供更准确的行数统计
+        根据CONFIG中的功能开关决定是否计算详细行数
         """
         if not self.code_content:
             return
             
-        # 使用专门的行数分析器
-        line_stats = LineCountAnalyzer.analyze_lines(self.code_content)
+        # 基本行数统计（总是需要的）
+        lines = self.code_content.split('\n')
+        self.stats.total_lines = len(lines)
+        self.stats.physical_lines = len(lines)
         
-        # 更新统计信息
-        self.stats.total_lines = line_stats['total_lines']
-        self.stats.code_lines = line_stats['code_lines']
-        self.stats.comment_lines = line_stats['comment_lines']
-        self.stats.blank_lines = line_stats['blank_lines']
-        self.stats.docstring_lines = line_stats['docstring_lines']
-        self.stats.executable_lines = line_stats['executable_lines']
-        self.stats.logical_lines = line_stats['logical_lines']
-        self.stats.physical_lines = line_stats['physical_lines']
+        # 简单统计
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                self.stats.blank_lines += 1
+            elif stripped.startswith('#'):
+                self.stats.comment_lines += 1
+            else:
+                self.stats.code_lines += 1
         
-        if CONFIG["show_line_numbers"]:
-            # 输出详细的行数统计信息
-            print(f"{Colors.GRAY}[{self.file_path.name}] "
-                  f"物理行: {line_stats['physical_lines']}, "
-                  f"逻辑行: {line_stats['logical_lines']}, "
-                  f"可执行行: {line_stats['executable_lines']}{Colors.RESET}")
+        # 详细行数分析（只在启用时计算）
+        if CONFIG["calculate_detailed_lines"]:
+            line_stats = LineCountAnalyzer.analyze_lines(self.code_content)
+            self.stats.total_lines = line_stats['total_lines']
+            self.stats.code_lines = line_stats['code_lines']
+            self.stats.comment_lines = line_stats['comment_lines']
+            self.stats.blank_lines = line_stats['blank_lines']
+            self.stats.docstring_lines = line_stats['docstring_lines']
+            self.stats.executable_lines = line_stats['executable_lines']
+            self.stats.logical_lines = line_stats['logical_lines']
+            self.stats.physical_lines = line_stats['physical_lines']
+            
+            # 日志输出详细信息
+            self.logger.debug(f"[{self.file_path.name}] "
+                            f"物理行: {line_stats['physical_lines']}, "
+                            f"逻辑行: {line_stats['logical_lines']}, "
+                            f"可执行行: {line_stats['executable_lines']}")
 
     def _parse_ast(self) -> bool:
         """解析文件为AST，成功返回True"""
         try:
             self.module_ast = ast.parse(self.code_content, filename=str(self.file_path))
+            self.logger.debug(f"成功解析AST: {self.file_path}")
             return True
-        except SyntaxError:
+        except SyntaxError as e:
+            self.logger.warning(f"AST解析失败: {self.file_path} - {str(e)}")
             return False
 
     def _analyze_ast(self):
-        """分析AST获取各种指标"""
+        """分析AST获取各种指标
+        
+        根据CONFIG中的功能开关决定进行哪些计算
+        """
         if not self.module_ast:
             return
 
@@ -807,11 +1046,12 @@ class PythonModuleAnalyzer:
         has_type_hints = False
         imports = {}
 
-        # 命名规范统计
-        naming_stats = NamingStats()
+        # 命名规范统计（只在启用时计算）
+        naming_stats = NamingStats() if CONFIG["check_naming_conventions"] else None
 
-        # 检查模块文档字符串
-        has_docstring = self._has_docstring(self.module_ast.body)
+        # 检查模块文档字符串（只在启用时计算）
+        if CONFIG["analyze_docstrings"]:
+            has_docstring = self._has_docstring(self.module_ast.body)
 
         # 遍历AST
         for node in ast.walk(self.module_ast):
@@ -819,8 +1059,8 @@ class PythonModuleAnalyzer:
             if isinstance(node, ast.ClassDef):
                 class_counter += 1
 
-                # 检查类命名
-                if CONFIG["check_naming"]:
+                # 检查类命名（只在启用时计算）
+                if CONFIG["check_naming_conventions"] and naming_stats:
                     if NamingConventionChecker.check_class_name(node.name):
                         naming_stats.good_names += 1
                         naming_stats.pascal_case_classes += 1
@@ -831,14 +1071,14 @@ class PythonModuleAnalyzer:
                             f"类名 '{node.name}' 不符合PascalCase规范"
                         )
 
-                # 检查类文档字符串
-                if self._has_docstring(node.body):
+                # 检查类文档字符串（只在启用时计算）
+                if CONFIG["analyze_docstrings"] and self._has_docstring(node.body):
                     has_docstring = True
 
             # 统计函数和方法
             elif isinstance(node, ast.FunctionDef):
-                # 检查函数命名
-                if CONFIG["check_naming"]:
+                # 检查函数命名（只在启用时计算）
+                if CONFIG["check_naming_conventions"] and naming_stats:
                     if NamingConventionChecker.check_function_name(node.name):
                         naming_stats.good_names += 1
                     else:
@@ -862,61 +1102,61 @@ class PythonModuleAnalyzer:
                 if not is_method:
                     function_counter += 1
 
-                # 检查函数文档字符串
-                if self._has_docstring(node.body):
+                # 检查函数文档字符串（只在启用时计算）
+                if CONFIG["analyze_docstrings"] and self._has_docstring(node.body):
                     has_docstring = True
 
                 # 检查类型注解
                 if node.returns or any(arg.annotation for arg in node.args.args):
                     has_type_hints = True
 
-                # 计算复杂度（简化版）
-                complexity += 1  # 基础复杂度
-                for inner_node in ast.walk(node):
-                    if isinstance(
-                        inner_node,
-                        (ast.If, ast.For, ast.While, ast.Try, ast.ExceptHandler),
-                    ):
-                        complexity += 1
-                    elif isinstance(inner_node, ast.BoolOp) and isinstance(
-                        inner_node.op, (ast.And, ast.Or)
-                    ):
-                        complexity += len(inner_node.values) - 1
+                # 计算复杂度（只在启用时计算）
+                if CONFIG["calculate_complexity"]:
+                    complexity += 1  # 基础复杂度
+                    for inner_node in ast.walk(node):
+                        if isinstance(
+                            inner_node,
+                            (ast.If, ast.For, ast.While, ast.Try, ast.ExceptHandler),
+                        ):
+                            complexity += 1
+                        elif isinstance(inner_node, ast.BoolOp) and isinstance(
+                            inner_node.op, (ast.And, ast.Or)
+                        ):
+                            complexity += len(inner_node.values) - 1
 
-            # 检查变量命名和类型注解
-            elif isinstance(node, ast.Assign):
-                if CONFIG["check_naming"]:
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            if NamingConventionChecker.check_variable_name(target.id):
-                                naming_stats.good_names += 1
-                                naming_stats.snake_case_vars += 1
-                            else:
-                                # 跳过魔术变量和常量
-                                if (
-                                    not (
-                                        target.id.startswith("__")
-                                        and target.id.endswith("__")
+            # 检查变量命名和类型注解（只在启用时计算）
+            elif isinstance(node, ast.Assign) and CONFIG["check_naming_conventions"] and naming_stats:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        if NamingConventionChecker.check_variable_name(target.id):
+                            naming_stats.good_names += 1
+                            naming_stats.snake_case_vars += 1
+                        else:
+                            # 跳过魔术变量和常量
+                            if (
+                                not (
+                                    target.id.startswith("__")
+                                    and target.id.endswith("__")
+                                )
+                                and not target.id.isupper()
+                            ):
+                                naming_stats.bad_names += 1
+                                case_type = (
+                                    NamingConventionChecker.get_name_case_type(
+                                        target.id
                                     )
-                                    and not target.id.isupper()
-                                ):
-                                    naming_stats.bad_names += 1
-                                    case_type = (
-                                        NamingConventionChecker.get_name_case_type(
-                                            target.id
-                                        )
-                                    )
-                                    if case_type == "camelCase":
-                                        naming_stats.camel_case_vars += 1
-                                    naming_stats.naming_issues.append(
-                                        f"变量名 '{target.id}' 不符合snake_case规范，使用了{case_type}"
-                                    )
+                                )
+                                if case_type == "camelCase":
+                                    naming_stats.camel_case_vars += 1
+                                naming_stats.naming_issues.append(
+                                    f"变量名 '{target.id}' 不符合snake_case规范，使用了{case_type}"
+                                )
 
             # 检查带类型注解的变量
             elif isinstance(node, ast.AnnAssign) and node.annotation:
                 has_type_hints = True
 
-                if CONFIG["check_naming"] and isinstance(node.target, ast.Name):
+                if CONFIG["check_naming_conventions"] and naming_stats and isinstance(node.target, ast.Name):
                     if NamingConventionChecker.check_variable_name(node.target.id):
                         naming_stats.good_names += 1
                     else:
@@ -933,8 +1173,8 @@ class PythonModuleAnalyzer:
                                 f"变量名 '{node.target.id}' 不符合snake_case规范"
                             )
 
-            # 收集导入信息
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            # 收集导入信息（只在启用时计算）
+            elif isinstance(node, (ast.Import, ast.ImportFrom)) and CONFIG["analyze_imports"]:
                 if isinstance(node, ast.Import):
                     for name in node.names:
                         module_name = name.name
@@ -957,12 +1197,12 @@ class PythonModuleAnalyzer:
         self.stats.class_count = class_counter
         self.stats.function_count = function_counter
         self.stats.method_count = method_counter
-        self.stats.cyclomatic_complexity = complexity
-        self.stats.quality.has_docstring = has_docstring
+        self.stats.cyclomatic_complexity = complexity if CONFIG["calculate_complexity"] else 0
+        self.stats.quality.has_docstring = has_docstring if CONFIG["analyze_docstrings"] else False
         self.stats.quality.has_type_hints = has_type_hints
-        self.stats.import_count = sum(len(names) for names in imports.values())
-        self.stats.imports = imports
-        self.stats.quality.naming_stats = naming_stats
+        self.stats.import_count = sum(len(names) for names in imports.values()) if CONFIG["analyze_imports"] else 0
+        self.stats.imports = imports if CONFIG["analyze_imports"] else {}
+        self.stats.quality.naming_stats = naming_stats if CONFIG["check_naming_conventions"] else NamingStats()
 
     def _detect_antipatterns(self):
         """检测代码中的反模式"""
@@ -979,19 +1219,22 @@ class PythonModuleAnalyzer:
 class PythonProjectAnalyzer:
     """分析整个Python项目目录"""
 
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, logger: AnalysisLogger):
         self.config = config
         self.root_path = Path(config["target_path"]).resolve()
         self.modules: Dict[str, ModuleInfo] = {}
         self.dependencies: Dict[str, Set[str]] = {}
         self.start_time = time.time()
+        self.logger = logger
+        self.files_processed = 0
+        self.total_files = 0
 
     def analyze(self) -> Dict:
         """分析整个项目
 
         返回包含分析结果的字典
         """
-        print(f"{Colors.CYAN}开始分析项目: {Colors.BOLD}{self.root_path}{Colors.RESET}")
+        self.logger.debug(f"开始分析项目: {self.root_path}")
 
         result = {
             "structure": [],
@@ -1018,26 +1261,30 @@ class PythonProjectAnalyzer:
         }
 
         # 第一步：发现所有Python模块
-        print(f"{Colors.BLUE}正在查找所有Python模块...{Colors.RESET}")
+        self.logger.debug("正在查找所有Python模块...")
         self._discover_modules()
 
         # 第二步：构建正确的目录结构
-        print(f"{Colors.BLUE}正在分析文件内容...{Colors.RESET}")
-        files_processed = 0
+        self.logger.debug("正在分析文件内容...")
+        
+        # 计算总文件数
+        self.total_files = self._count_python_files()
+        self.logger.debug(f"找到 {self.total_files} 个Python文件")
 
         # 修复：使用递归方式构建正确的目录结构
         root_structure = self._build_directory_structure(self.root_path, result)
         result["structure"] = [root_structure] if root_structure else []
 
-        print(f"\n{Colors.GREEN}文件分析完成!{Colors.RESET}")
+        self.logger.debug("文件分析完成!")
 
-        # 构建模块关系
-        print(f"{Colors.BLUE}正在构建模块依赖关系...{Colors.RESET}")
-        self._build_module_relationships()
+        # 构建模块关系（只在启用时计算）
+        if CONFIG["build_dependency_graph"]:
+            self.logger.debug("正在构建模块依赖关系...")
+            self._build_module_relationships()
 
-        # 计算项目总体质量评分
-        print(f"{Colors.BLUE}正在计算质量评分...{Colors.RESET}")
-        if result["total"]["files"] > 0:
+        # 计算项目总体质量评分（只在启用时计算）
+        if CONFIG["calculate_quality_score"] and result["total"]["files"] > 0:
+            self.logger.debug("正在计算质量评分...")
             result["total"]["quality_score"] = self._calculate_project_score(result)
 
         # 生成质量摘要
@@ -1052,9 +1299,22 @@ class PythonProjectAnalyzer:
         }
 
         elapsed = time.time() - self.start_time
-        print(f"{Colors.GREEN}分析完成! 耗时: {round(elapsed, 2)}秒{Colors.RESET}")
+        self.logger.info(f"分析完成! 发现 {result['total']['files']} 个文件，耗时: {round(elapsed, 2)}秒")
 
         return result
+
+    def _count_python_files(self) -> int:
+        """计算Python文件总数"""
+        count = 0
+        try:
+            for item in self.root_path.rglob("*.py"):
+                if item.is_file() and self._should_process_file(item.name):
+                    parent_dir = item.parent
+                    if not any(self._should_exclude_dir(part) for part in parent_dir.parts):
+                        count += 1
+        except (PermissionError, OSError):
+            pass
+        return count
 
     def _build_directory_structure(self, dir_path: Path, result: Dict) -> Dict:
         """递归构建正确的目录结构"""
@@ -1293,6 +1553,16 @@ class PythonProjectAnalyzer:
         返回一个元组(file_entry, stats_dict)
         """
         try:
+            # 更新进度计数器
+            self.files_processed += 1
+            
+        # 显示文件处理进度（只在DEBUG模式下显示）
+            self.logger.file_progress(
+                str(file_path.relative_to(self.root_path)),
+                self.files_processed,
+                self.total_files
+            )
+            
             rel_path = str(file_path.relative_to(self.root_path))
 
             # 为结构创建文件条目
@@ -1312,7 +1582,7 @@ class PythonProjectAnalyzer:
                 return file_entry, {"total_lines": 0}
 
             # 分析Python文件
-            analyzer = PythonModuleAnalyzer(file_path)
+            analyzer = PythonModuleAnalyzer(file_path, self.logger)
             stats = analyzer.analyze()
             stats_dict = asdict(stats)
 
@@ -1325,7 +1595,7 @@ class PythonProjectAnalyzer:
 
             return file_entry, stats_dict
         except Exception as e:
-            print(f"分析文件 {file_path} 时出错: {e}")
+            self.logger.error(f"分析文件 {file_path} 时出错: {e}")
             # 即使分析失败也返回条目
             return {
                 "path": str(file_path.relative_to(self.root_path)),
@@ -1336,7 +1606,12 @@ class PythonProjectAnalyzer:
             }, {"total_lines": 0}
 
     def _update_total_stats(self, total: Dict, stats: Dict):
-        """使用文件统计信息更新总体统计信息"""
+        """
+        使用文件统计信息更新总体统计信息
+        
+        按照模块化设计原则，专门负责统计数据聚合
+        遵循PEP8规范，提供完整的行数统计
+        """
         total["files"] += 1
         total["total_lines"] += stats.get("total_lines", 0)
         total["code_lines"] += stats.get("code_lines", 0)
@@ -1348,6 +1623,11 @@ class PythonProjectAnalyzer:
         total["functions"] += stats.get("function_count", 0)
         total["methods"] += stats.get("method_count", 0)
         total["imports"] += stats.get("import_count", 0)
+        
+        # 新增：详细行数统计
+        total["executable_lines"] = total.get("executable_lines", 0) + stats.get("executable_lines", 0)
+        total["logical_lines"] = total.get("logical_lines", 0) + stats.get("logical_lines", 0)
+        total["physical_lines"] = total.get("physical_lines", 0) + stats.get("physical_lines", 0)
 
         quality = stats.get("quality", {})
         if isinstance(quality, dict):
@@ -1545,7 +1825,10 @@ class OutputFormatter:
     def _text_format(result: Dict, config: Dict) -> str:
         """格式化结果为纯文本"""
         output = [
-            f"{Colors.BOLD}{Colors.CYAN}===== Python项目分析报告 ====={Colors.RESET}\n"
+            f"{Colors.BOLD}{Colors.CYAN}" + "=" * 55 + f"{Colors.RESET}",
+            f"{Colors.BOLD}{Colors.CYAN}=         Python代码库分析报告 v{__version__}                 ={Colors.RESET}",
+            f"{Colors.BOLD}{Colors.CYAN}" + "=" * 55 + f"{Colors.RESET}",
+            ""
         ]
 
         # 项目质量评分
@@ -1575,19 +1858,44 @@ class OutputFormatter:
         output.append(f"{Colors.BOLD}{Colors.BLUE}=== 项目摘要 ==={Colors.RESET}")
         total = result["total"]
         output.append(f"分析的文件数: {total['files']}")
-        output.append(f"总行数: {total['total_lines']}")
-        output.append(
-            f"代码行: {total['code_lines']} ({OutputFormatter._percentage(total['code_lines'], total['total_lines'])}%)"
-        )
-        output.append(
-            f"注释行: {total['comment_lines']} ({OutputFormatter._percentage(total['comment_lines'], total['total_lines'])}%)"
-        )
-        output.append(
-            f"文档字符串行: {total['docstring_lines']} ({OutputFormatter._percentage(total['docstring_lines'], total['total_lines'])}%)"
-        )
-        output.append(
-            f"空行: {total['blank_lines']} ({OutputFormatter._percentage(total['blank_lines'], total['total_lines'])}%)"
-        )
+        
+        # 详细行数统计
+        if config.get("show_line_numbers", True):
+            output.append(f"总行数: {total['total_lines']:,}")
+            output.append(
+                f"代码行: {total['code_lines']:,} ({OutputFormatter._percentage(total['code_lines'], total['total_lines'])}%)"
+            )
+            output.append(
+                f"注释行: {total['comment_lines']:,} ({OutputFormatter._percentage(total['comment_lines'], total['total_lines'])}%)"
+            )
+            output.append(
+                f"文档字符串行: {total['docstring_lines']:,} ({OutputFormatter._percentage(total['docstring_lines'], total['total_lines'])}%)"
+            )
+            output.append(
+                f"空行: {total['blank_lines']:,} ({OutputFormatter._percentage(total['blank_lines'], total['total_lines'])}%)"
+            )
+            
+            # 新增：详细行数分析
+            if total.get('executable_lines', 0) > 0:
+                output.append(f"可执行代码行: {total['executable_lines']:,}")
+            if total.get('logical_lines', 0) > 0:
+                output.append(f"逻辑代码行: {total['logical_lines']:,}")
+            if total.get('physical_lines', 0) > 0:
+                output.append(f"物理代码行: {total['physical_lines']:,}")
+        else:
+            output.append(f"总行数: {total['total_lines']}")
+            output.append(
+                f"代码行: {total['code_lines']} ({OutputFormatter._percentage(total['code_lines'], total['total_lines'])}%)"
+            )
+            output.append(
+                f"注释行: {total['comment_lines']} ({OutputFormatter._percentage(total['comment_lines'], total['total_lines'])}%)"
+            )
+            output.append(
+                f"文档字符串行: {total['docstring_lines']} ({OutputFormatter._percentage(total['docstring_lines'], total['total_lines'])}%)"
+            )
+            output.append(
+                f"空行: {total['blank_lines']} ({OutputFormatter._percentage(total['blank_lines'], total['total_lines'])}%)"
+            )
         output.append(f"类数量: {total['classes']}")
         output.append(f"函数数量: {total['functions']}")
         output.append(f"方法数量: {total['methods']}")
@@ -1602,7 +1910,7 @@ class OutputFormatter:
             OutputFormatter._format_entry(entry, result, output, 0)
 
         # 模块依赖关系可视化
-        if config["detailed_imports"] and result["dependencies"]:
+        if config["analyze_imports"] and result["dependencies"]:
             output.append(
                 f"\n{Colors.BOLD}{Colors.BLUE}=== 模块依赖关系 ==={Colors.RESET}"
             )
@@ -1671,7 +1979,7 @@ class OutputFormatter:
                         output.append(f"  - ... 还有 {len(patterns) - 3} 个")
 
         # 命名规范问题
-        if config["check_naming"]:
+        if config["check_naming_conventions"]:
             naming_issue_files = []
             for path, stats in result["stats"].items():
                 if not isinstance(stats, dict):
@@ -1737,7 +2045,12 @@ class OutputFormatter:
 
     @staticmethod
     def _file_info(entry: Dict, result: Dict) -> str:
-        """格式化文件信息用于显示"""
+        """
+        格式化文件信息用于显示
+        
+        按照模块化设计原则，提供详细的文件统计信息
+        遵循PEP8规范，返回格式化的文件信息字符串
+        """
         stats = result["stats"].get(entry["path"])
         if not isinstance(stats, dict):
             return ""
@@ -1749,43 +2062,81 @@ class OutputFormatter:
             score_category, score_color = QualityScoreCalculator.get_score_category(
                 score
             )
-            info.append(f"质量: {score_color}{score}{Colors.RESET}")
+            if CONFIG.get("color_output", True):
+                info.append(f"质量: {score_color}{score}{Colors.RESET}")
+            else:
+                info.append(f"质量: {score}")
 
-        if stats.get("total_lines", 0) > 0:
+        # 详细行数统计
+        if CONFIG.get("show_line_numbers", True) and stats.get("total_lines", 0) > 0:
+            total_lines = stats["total_lines"]
+            
+            # 基本行数信息
+            line_info = [f"{total_lines}行"]
+            
+            # 添加详细行数分解
+            if stats.get("code_lines", 0) > 0:
+                code_lines = stats["code_lines"]
+                percentage = round((code_lines / total_lines) * 100, 1) if total_lines > 0 else 0
+                line_info.append(f"{code_lines}代码({percentage}%)")
+            
+            if stats.get("comment_lines", 0) > 0:
+                line_info.append(f"{stats['comment_lines']}注释")
+                
+            if stats.get("docstring_lines", 0) > 0:
+                line_info.append(f"{stats['docstring_lines']}文档")
+            
+            # 将行数信息添加到info中
+            info.append(", ".join(line_info))
+        elif stats.get("total_lines", 0) > 0:
+            # 简化模式，只显示总行数
             info.append(f"{stats['total_lines']}行")
 
-            if "class_count" in stats and stats["class_count"] > 0:
-                info.append(f"{stats['class_count']}类")
+        # 代码结构信息
+        if "class_count" in stats and stats["class_count"] > 0:
+            info.append(f"{stats['class_count']}类")
 
-            if "function_count" in stats and stats["function_count"] > 0:
-                info.append(f"{stats['function_count']}函数")
+        if "function_count" in stats and stats["function_count"] > 0:
+            info.append(f"{stats['function_count']}函数")
 
-            if "method_count" in stats and stats["method_count"] > 0:
-                info.append(f"{stats['method_count']}方法")
+        if "method_count" in stats and stats["method_count"] > 0:
+            info.append(f"{stats['method_count']}方法")
 
-            if "cyclomatic_complexity" in stats and stats["cyclomatic_complexity"] > 0:
-                complexity = stats["cyclomatic_complexity"]
+        # 复杂度信息（使用颜色编码）
+        if "cyclomatic_complexity" in stats and stats["cyclomatic_complexity"] > 0:
+            complexity = stats["cyclomatic_complexity"]
+            if CONFIG.get("color_output", True):
                 if complexity > 30:
                     info.append(f"复杂度: {Colors.RED}{complexity}{Colors.RESET}")
                 elif complexity > 15:
                     info.append(f"复杂度: {Colors.YELLOW}{complexity}{Colors.RESET}")
                 else:
                     info.append(f"复杂度: {complexity}")
+            else:
+                info.append(f"复杂度: {complexity}")
 
-            quality = stats.get("quality", {})
-            if isinstance(quality, dict):
-                if quality.get("antipatterns_count", 0) > 0:
-                    count = quality["antipatterns_count"]
+        # 质量问题信息
+        quality = stats.get("quality", {})
+        if isinstance(quality, dict):
+            if quality.get("antipatterns_count", 0) > 0:
+                count = quality["antipatterns_count"]
+                if CONFIG.get("color_output", True):
                     info.append(f"{Colors.YELLOW}{count}个反模式{Colors.RESET}")
+                else:
+                    info.append(f"{count}个反模式")
 
-                naming_stats = quality.get("naming_stats", {})
-                if (
-                    isinstance(naming_stats, dict)
-                    and naming_stats.get("bad_names", 0) > 0
-                ):
-                    count = naming_stats["bad_names"]
+            naming_stats = quality.get("naming_stats", {})
+            if (
+                isinstance(naming_stats, dict)
+                and naming_stats.get("bad_names", 0) > 0
+            ):
+                count = naming_stats["bad_names"]
+                if CONFIG.get("color_output", True):
                     info.append(f"{Colors.YELLOW}{count}个命名问题{Colors.RESET}")
+                else:
+                    info.append(f"{count}个命名问题")
 
+        # 文件大小信息
         if entry.get("size"):
             info.append(f"{OutputFormatter._format_size(entry['size'])}")
 
@@ -1834,7 +2185,17 @@ def parse_args():
     """解析命令行参数"""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Python代码库分析工具")
+    parser = argparse.ArgumentParser(
+        description=f"Python代码库分析工具 v{__version__}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+示例:
+  {os.path.basename(sys.argv[0])} .                    # 分析当前目录
+  {os.path.basename(sys.argv[0])} /path/to/project     # 分析指定项目
+  {os.path.basename(sys.argv[0])} . --debug           # 启用调试模式
+  {os.path.basename(sys.argv[0])} . --format json     # 输出JSON格式
+        """
+    )
     parser.add_argument(
         "path", nargs="?", default=".", help="Python项目路径（默认：当前目录）"
     )
@@ -1844,59 +2205,108 @@ def parse_args():
         default="text",
         help="输出格式",
     )
+    
+    # 日志级别控制（互斥组）
+    log_group = parser.add_mutually_exclusive_group()
+    log_group.add_argument(
+        "--debug", "-d", action="store_true", 
+        help="启用调试模式（显示详细日志）"
+    )
+    log_group.add_argument(
+        "--quiet", "-q", action="store_true", 
+        help="安静模式（只显示警告和错误）"
+    )
+    
+    # 功能开关（控制功能的计算和输出）
+    parser.add_argument(
+        "--no-detailed-lines", action="store_true", 
+        help="不计算详细行数分解"
+    )
+    parser.add_argument(
+        "--no-antipatterns", action="store_true", 
+        help="不检测反模式"
+    )
+    parser.add_argument(
+        "--no-naming", action="store_true", 
+        help="不检查命名规范"
+    )
+    parser.add_argument(
+        "--no-imports", action="store_true", 
+        help="不分析导入依赖"
+    )
+    parser.add_argument(
+        "--no-complexity", action="store_true", 
+        help="不计算循环复杂度"
+    )
+    parser.add_argument(
+        "--no-docstrings", action="store_true", 
+        help="不分析文档字符串"
+    )
+    parser.add_argument(
+        "--no-quality-score", action="store_true", 
+        help="不计算质量评分"
+    )
+    parser.add_argument(
+        "--no-dependency-graph", action="store_true", 
+        help="不构建依赖关系图"
+    )
+    parser.add_argument(
+        "--no-project-structure", action="store_true", 
+        help="不显示项目结构"
+    )
+    
+    parser.add_argument(
+        "--version", "-v", action="version", 
+        version=f"Python代码库分析工具 v{__version__}"
+    )
+    
+    # 其他参数
     parser.add_argument("--max-workers", type=int, default=4, help="最大并行工作线程数")
     parser.add_argument(
         "--max-file-size", type=int, default=10, help="要分析的最大文件大小（MB）"
     )
     parser.add_argument(
-        "--no-antipatterns",
-        action="store_false",
-        dest="detect_antipatterns",
-        help="禁用反模式检测",
-    )
-    parser.add_argument(
-        "--no-complexity",
-        action="store_false",
-        dest="calculate_complexity",
-        help="禁用复杂度计算",
-    )
-    parser.add_argument(
-        "--no-docstrings",
-        action="store_false",
-        dest="analyze_docstrings",
-        help="禁用文档字符串分析",
-    )
-    parser.add_argument(
-        "--no-imports",
-        action="store_false",
-        dest="detailed_imports",
-        help="禁用详细导入分析",
-    )
-    parser.add_argument(
-        "--no-naming",
-        action="store_false",
-        dest="check_naming",
-        help="禁用命名规范检查",
-    )
-    parser.add_argument(
-        "--no-color", action="store_false", dest="color_output", help="禁用彩色输出"
+        "--no-color", action="store_true", help="禁用彩色输出"
     )
     parser.add_argument("--show-hidden", action="store_true", help="包含隐藏文件和目录")
 
     args = parser.parse_args()
 
-    # 使用命令行参数更新配置
+    # 直接更新CONFIG
     CONFIG["target_path"] = args.path
     CONFIG["output_format"] = args.format
     CONFIG["max_workers"] = args.max_workers
     CONFIG["max_file_size_mb"] = args.max_file_size
-    CONFIG["detect_antipatterns"] = args.detect_antipatterns
-    CONFIG["calculate_complexity"] = args.calculate_complexity
-    CONFIG["analyze_docstrings"] = args.analyze_docstrings
-    CONFIG["detailed_imports"] = args.detailed_imports
-    CONFIG["check_naming"] = args.check_naming
-    CONFIG["color_output"] = args.color_output
     CONFIG["show_hidden"] = args.show_hidden
+    CONFIG["color_output"] = not args.no_color
+    
+    # 设置日志级别
+    if args.debug:
+        CONFIG["log_level"] = "DEBUG"
+    elif args.quiet:
+        CONFIG["log_level"] = "WARNING"
+    else:
+        CONFIG["log_level"] = "INFO"
+    
+    # 设置功能开关
+    if args.no_detailed_lines:
+        CONFIG["calculate_detailed_lines"] = False
+    if args.no_antipatterns:
+        CONFIG["detect_antipatterns"] = False
+    if args.no_naming:
+        CONFIG["check_naming_conventions"] = False
+    if args.no_imports:
+        CONFIG["analyze_imports"] = False
+    if args.no_complexity:
+        CONFIG["calculate_complexity"] = False
+    if args.no_docstrings:
+        CONFIG["analyze_docstrings"] = False
+    if args.no_quality_score:
+        CONFIG["calculate_quality_score"] = False
+    if args.no_dependency_graph:
+        CONFIG["build_dependency_graph"] = False
+    if args.no_project_structure:
+        CONFIG["show_project_structure"] = False
 
     return args
 
@@ -1907,31 +2317,39 @@ if __name__ == "__main__":
         # 保存用户自定义的目标路径（如果已设置）
         user_target_path = CONFIG.get("target_path", ".")
 
-        # 解析命令行参数
+        # 解析命令行参数（直接更新CONFIG）
         args = parse_args()
 
         # 如果命令行未指定路径但用户在代码中已设置了路径，则恢复用户设置
         if args.path == "." and user_target_path != ".":
             CONFIG["target_path"] = user_target_path
+        
+        # 创建日志管理器（使用CONFIG中的日志级别）
+        log_level = LogLevel(CONFIG["log_level"])
+        logger = AnalysisLogger(log_level)
 
         # 禁用彩色输出（如果需要）
         if not CONFIG["color_output"]:
             Colors.disable()
 
-        print(
-            # f"{Colors.CYAN}正在分析路径: {Colors.BOLD}{CONFIG['target_path']}{Colors.RESET}"
-        )
+        logger.debug(f"日志级别: {CONFIG['log_level']}")
+        logger.debug(f"功能开关: 详细行数={CONFIG['calculate_detailed_lines']}, "
+                    f"反模式={CONFIG['detect_antipatterns']}, "
+                    f"命名检查={CONFIG['check_naming_conventions']}, "
+                    f"质量评分={CONFIG['calculate_quality_score']}")
 
         # 运行分析
-        analyzer = PythonProjectAnalyzer(CONFIG)
+        analyzer = PythonProjectAnalyzer(CONFIG, logger)
         result = analyzer.analyze()
 
         # 输出结果
-        print(OutputFormatter.format(result, CONFIG))
+        output = OutputFormatter.format(result, CONFIG)
+        print(output)
+        
     except KeyboardInterrupt:
-        print(f"\n{Colors.YELLOW}操作被用户取消{Colors.RESET}")
+        logger.warning("\n操作被用户取消")
     except Exception as e:
-        print(f"{Colors.RED}错误: {str(e)}{Colors.RESET}")
-        import traceback
-
-        traceback.print_exc()
+        logger.error(f"分析过程中发生错误: {str(e)}")
+        if CONFIG["log_level"] == "DEBUG":
+            import traceback
+            traceback.print_exc()
