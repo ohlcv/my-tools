@@ -1252,7 +1252,7 @@ def parse_args() -> dict:
     config["max_depth"] = args.max_depth
     config["show_hidden"] = args.show_hidden
     config["color_output"] = not args.no_color
-    config["count_lines"] = args.count_lines
+    config["count_lines"] = args.count_lines or config["count_lines"]  # 保持默认的True设置
     config["max_workers"] = args.max_workers
     
     # 设置日志级别
